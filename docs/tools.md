@@ -65,29 +65,30 @@ HTTP `4xx/5xx` 不属于工具失败，仍由 `http_request` 返回 `ok: true` �
 }
 ```
 
-## 3. `authenticate`
+## 3. `set_auth`
 
-通过自动登录或手动录入创建、替换 auth profile。
+通过本机敏感输入页面创建或替换 auth profile。认证类型和注入方式已由 Agent 根据项目代码写入项目配置，用户不需要选择。
 
 ### 参数
 
-| 参数 | 类型 | 必填 | 允许值 | 说明 |
-|---|---|---:|---|---|
-| `project_key` | string | 是 | 已配置项目 | 必须匹配当前会话配置。 |
-| `auth_profile_name` | string | 是 | 已配置 profile | 目标 profile。 |
-| `mode` | string | 是 | `login`, `manual` | 获取模式。 |
+| 参数 | 类型 | 必填 | 说明 |
+|---|---|---:|---|
+| `project_key` | string | 是 | 必须匹配当前会话配置。 |
+| `auth_profile_name` | string | 是 | 当前配置中存在的目标 profile。 |
 
 ### 行为
 
-- `login` 要求 profile 配置 `login`。
-- `manual` 为每个 credential 显示敏感输入字段。
-- 自动登录复用普通请求的 origin、HTTP/TLS、代理、重定向、超时和方法确认策略。
-- Server 先完成所有必要风险确认，再打开敏感输入页面。
+- 读取 profile 中唯一的 `type`，不接受工具参数临时覆盖认证类型。
 - 使用 URL elicitation 打开本机页面。
-- 不向 Agent 返回输入值、登录 body 或提取后的认证值。
-- 同一 profile 的 authenticate 串行执行。
+- 页面只读显示认证类型、目标 origin 和注入摘要，并提供一个敏感值输入框。摘要包括目标 Header、prefix，或 Cookie 与派生 CSRF Header 名称。
+- `bearer` 和 `header` 保存一个值；`cookie` 解析带或不带 `Cookie:` 前缀的 Cookie bundle。
+- Cookie 输入最大 16 KiB、最多 50 项，并拒绝 CRLF、控制字符、非法名称和无法解析的条目。
+- 不向 Agent 返回输入值。
+- 同一 profile 的 `set_auth` 串行执行。
 - 成功后原子替换旧 profile 文件。
-- 登录响应不写入 response cache，日志只记录提取和脱敏统计。
+- 日志只记录认证类型、值数量、Cookie 名和状态变化，不记录认证值。
+- 如果 Agent 判断的认证类型或注入字段错误，Agent 修改 `.api-prober.json`，重新调用 `configure_session` 后再调用 `set_auth`。
+- 配置中的认证类型或注入对象发生变化时，旧值立即停止注入并标记 `invalid`，原因是 `auth_config_changed`。
 
 ### 成功示例
 
@@ -97,14 +98,30 @@ HTTP `4xx/5xx` 不属于工具失败，仍由 `http_request` 返回 `ok: true` �
   "request_id": "req_02",
   "project_key": "crm-dev",
   "auth_profile_name": "default",
+  "auth_type": "bearer",
   "status": "valid",
-  "credential_count": 1,
+  "stored_value_count": 1,
   "created_at": "2026-08-15T10:01:00Z",
   "expires_at": "2026-08-15T12:01:00Z"
 }
 ```
 
-`expires_at` 仅在能从 JWT `exp` 或响应属性可靠获得时返回。
+`expires_at` 仅在 Bearer/Header 值可按 JWT 解析出 `exp` 时返回；解析不代表验签。Cookie profile 可额外返回 `cookie_names`，但绝不返回 Cookie 值：
+
+```json
+{
+  "ok": true,
+  "request_id": "req_02b",
+  "project_key": "legacy-test",
+  "auth_profile_name": "session",
+  "auth_type": "cookie",
+  "status": "valid",
+  "stored_value_count": 2,
+  "cookie_names": ["SESSION", "XSRF-TOKEN"],
+  "created_at": "2026-08-15T10:01:00Z",
+  "expires_at": null
+}
+```
 
 ## 4. `get_auth_status`
 
@@ -124,6 +141,8 @@ HTTP `4xx/5xx` 不属于工具失败，仍由 `http_request` 返回 `ok: true` �
 - `invalid`
 - `expired`
 
+profile 条目固定返回 `auth_type` 和 `stored_value_count`。Cookie profile 可以返回 `cookie_names`；`invalid` 状态可以返回 `invalid_reason`，例如 `auth_config_changed` 或 `response_rule_matched`。这些字段都不得包含认证值。
+
 ### 成功示例
 
 ```json
@@ -134,8 +153,9 @@ HTTP `4xx/5xx` 不属于工具失败，仍由 `http_request` 返回 `ok: true` �
     {
       "auth_profile_name": "default",
       "origin": "http://crm-dev.internal:8080",
+      "auth_type": "bearer",
       "status": "valid",
-      "credential_count": 1,
+      "stored_value_count": 1,
       "created_at": "2026-08-15T10:01:00Z",
       "last_used_at": "2026-08-15T10:05:00Z",
       "expires_at": null
@@ -364,12 +384,12 @@ JSON 和 form 的 Content-Type 由 Server 设置。`headers` 不能覆盖该值�
 | `DEBUG_CONFIRMATION_DECLINED` | 用户拒绝 debug capture | 使用普通日志继续诊断。 |
 | `METADATA_TARGET_BLOCKED` | 命中 metadata 硬阻止 | 仅在确有需要时使用用户级危险覆盖。 |
 | `AUTH_PROFILE_NOT_FOUND` | 配置中不存在 profile | 修复 profile 名称。 |
-| `AUTH_REQUIRED` | profile 本地缺失 | 调用 `authenticate`。 |
-| `AUTH_INVALID` | profile 已被标记 invalid | 重新 authenticate。 |
-| `AUTH_EXPIRED` | 已知过期 | 重新 authenticate。 |
+| `AUTH_REQUIRED` | profile 本地缺失 | 调用 `set_auth`。 |
+| `AUTH_INVALID` | profile 已被标记 invalid | 重新调用 `set_auth`。 |
+| `AUTH_EXPIRED` | 已知过期 | 重新调用 `set_auth`。 |
 | `AUTH_INPUT_CANCELLED` | 用户取消本机输入 | 保持原 profile 不变。 |
-| `AUTH_INPUT_TIMEOUT` | 本机输入页面超过 5 分钟 | 重新调用 authenticate。 |
-| `AUTH_EXTRACTION_FAILED` | 登录成功但提取规则未命中 | 检查登录响应结构和配置路径。 |
+| `AUTH_INPUT_TIMEOUT` | 本机输入页面超过 5 分钟 | 重新调用 `set_auth`。 |
+| `AUTH_INPUT_INVALID` | Token/Header 值为空，或 Cookie bundle 超限、含非法字符或无法解析 | 修正输入并重新调用 `set_auth`。 |
 | `REQUEST_INVALID` | URL、Header、body 参数不合法 | 修复参数。 |
 | `REQUEST_TIMEOUT` | 排队或请求超过总超时 | 调整 timeout 或检查服务。 |
 | `REQUEST_FAILED` | DNS、连接或协议错误 | 使用 diagnostics 定位。 |

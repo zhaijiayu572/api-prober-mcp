@@ -86,7 +86,7 @@ codex mcp add api-prober -- \
 codex mcp get api-prober
 ```
 
-不要把 Token、密码或代理凭证放入客户端 MCP 环境变量。
+不要把 Token、Cookie 值或代理凭证放入客户端 MCP 环境变量。
 
 ## 5. 用户级配置
 
@@ -207,7 +207,7 @@ Agent 工作约定可以放入项目的 `CLAUDE.md` 或 `AGENTS.md`：
 1. 能发现 7 个工具。
 2. `configure_session` 能加载回环地址项目。
 3. 非默认 origin 能显示确认。
-4. `authenticate` 能显示 URL elicitation。
+4. `set_auth` 能显示由配置确定认证类型的 URL elicitation。
 5. `http_request` 能返回结构化结果。
 6. `get_diagnostics` 能按 request ID 查询日志。
 

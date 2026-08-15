@@ -8,7 +8,7 @@
 
 在复用缺少文档的已有 API 时，开发者通常需要打开浏览器开发者工具、完成登录、复制请求并截取响应，才能确认后台数据的字段、类型和嵌套结构。
 
-API Prober MCP Server 为 Claude Code 和 Codex 提供受控的 HTTP 探测能力。Agent 可以读取项目代码和项目配置，自主完成鉴权、请求接口、查看响应结构，并使用客户端自身的文件工具管理项目快照。
+API Prober MCP Server 为 Claude Code 和 Codex 提供受控的 HTTP 探测能力。Agent 可以读取项目代码和项目配置，识别认证方式并引导用户安全录入认证值，然后请求接口、查看响应结构，并使用客户端自身的文件工具管理项目快照。
 
 ## 2. 核心目标
 
@@ -31,8 +31,7 @@ API Prober MCP Server 为 Claude Code 和 Codex 提供受控的 HTTP 探测能�
 - 配置模型：Pydantic。
 - MCP 传输：stdio。
 - 客户端：Claude Code、Codex CLI。
-- 鉴权注入：Bearer、自定义 Header、Cookie。
-- 登录提取：JSON body、响应 Header、Set-Cookie。
+- 手工鉴权注入：Bearer、自定义 Header、Cookie。
 - 请求体：JSON、URL encoded form、显式 Content-Type 的 raw body。
 
 ### 3.2 非目标
@@ -40,6 +39,7 @@ API Prober MCP Server 为 Claude Code 和 Codex 提供受控的 HTTP 探测能�
 - Pi Agent 集成。
 - Windows 首版支持和 macOS 首版验收。
 - OAuth2 授权码流程、自动刷新、多步 SSO 和扫码登录。
+- 自动调用登录接口、用户名密码收集、密码加密转换和任意认证脚本。
 - 验证码自动识别。
 - 文件上传和 multipart 文件内容。
 - MCP Server 直接写入项目快照。
@@ -54,7 +54,7 @@ API Prober MCP 负责：
 
 - 加载和校验会话配置。
 - 网络访问授权与请求确认。
-- 鉴权获取、存储、注入、失效标记和删除。
+- 认证值安全录入、存储、注入、失效标记和删除。
 - HTTP 请求、重定向、重试、超时和代理策略。
 - 响应脱敏、数组采样、结果预算和临时缓存。
 - 结构化审计日志、诊断日志和诊断查询。
@@ -63,7 +63,7 @@ Agent 负责：
 
 - 读取项目根目录的 `.api-prober.json`。
 - 调用 `configure_session` 注入项目配置。
-- 根据项目代码选择接口、参数、认证字段路径和敏感字段路径。
+- 根据项目代码选择接口、参数、认证类型、注入配置和敏感字段路径。
 - 读取、判断、保存和更新项目内接口快照。
 - 使用客户端自身的文件权限系统写项目文件。
 
@@ -71,9 +71,9 @@ MCP 不感知项目快照的目录、文件名、有效期或 Git 策略。
 
 ### 4.2 凭证对 Agent 不透明
 
-- 用户名、密码、Token 和 Cookie 值不得作为 MCP 工具参数经过 Agent。
+- Token 和 Cookie 值不得作为 MCP 工具参数经过 Agent。
 - 敏感输入通过 URL 模式 elicitation 打开的本机页面提交。
-- `authenticate` 只返回状态和 profile 标识，不返回认证值。
+- `set_auth` 只返回状态、profile 标识和认证类型，不返回认证值。
 - HTTP 请求通过 `auth_profile_name` 引用凭证，由 Server 注入。
 - 已知认证值出现在响应中时必须按精确值脱敏。
 
@@ -154,7 +154,7 @@ API Prober MCP Server
 - 包含 `schemaVersion: 1`。
 - 通过严格 Schema 校验。
 - 拒绝未知字段、错误类型和不兼容版本。
-- 不包含 Token、密码或其他明文秘密。
+- 不包含 Token、Cookie 值或其他明文秘密。
 
 Server 对规范化配置计算哈希。项目声明的非默认 target 在首次加载或配置哈希变化后重新确认。
 
@@ -219,7 +219,7 @@ Server 对规范化配置计算哈希。项目声明的非默认 target 在首�
 
 - `GET`、`HEAD`、`OPTIONS` 在已授权 origin 上自动执行。
 - `POST`、`PUT`、`PATCH`、`DELETE` 默认进行 elicitation。
-- 项目端点规则可以声明无需确认的登录或查询端点。
+- 项目端点规则可以声明无需确认的已知查询端点。
 - 授权按 `method + exact origin + path pattern` 生效，仅限当前会话。
 - 不根据接口名称猜测是否安全。
 
@@ -289,7 +289,7 @@ Header 名和值限制长度并拒绝换行符。
 - 全局最多 8 个执行中请求。
 - 同一 origin 最多 4 个执行中请求。
 - 超出的请求排队，排队时间计入总超时并单独记录。
-- 同一 auth profile 的登录和替换操作串行。
+- 同一 auth profile 的设置和替换操作串行。
 
 ### 9.8 重定向
 
@@ -312,40 +312,49 @@ projectKey + authProfileName + exact origin
 
 认证值不能跨 origin 复用。跨 origin 重定向即使获准，也不能携带原 profile。
 
-### 10.2 获取模式
+### 10.2 Agent 识别与用户录入
 
-`authenticate` 支持：
+第一版不执行登录接口，不收集用户名或密码，也不提供认证值提取、加密转换或自定义脚本。用户通过浏览器、现有客户端或其他系统自行取得认证值，再调用 `set_auth` 在本机页面录入。
 
-- `login`：用户在本机页面输入登录字段，Server 调用配置的登录接口并提取认证值。
-- `manual`：用户在本机页面手工粘贴 Token/Cookie，适用于验证码、扫码、SSO 或复杂认证。
+Agent 读取项目代码后负责：
 
-用户名、密码和手工认证值不经过 Agent，且用户名和密码使用后立即丢弃。
+- 判断项目使用 `bearer`、`header` 或 `cookie`。
+- 将判断结果及其注入配置写入 `.api-prober.json`。
+- 调用 `configure_session`，再调用 `set_auth(project_key, auth_profile_name)`。
 
-自动登录请求复用普通请求的 origin、HTTP/TLS、代理、重定向、超时和非只读方法策略。Server 应先完成必要风险确认，再打开敏感输入页面，避免用户先提交凭证后才发现目标不可用或未获授权。
+用户不在页面选择认证类型。页面只读展示 Agent 配置的认证类型、目标 origin 和注入摘要，并提供一个敏感值输入框。若 Agent 判断错误，Agent 修改项目配置、重新调用 `configure_session` 和 `set_auth`，无需用户在页面理解注入字段。
 
-### 10.3 登录字段
+### 10.3 单一认证类型
 
-登录页面支持配置扁平字段，例如 username、password、tenantId。字段类型支持 text 和 password。静态 body 只能包含非敏感常量。
+每个 auth profile 必须且只能声明一种认证类型：
 
-复杂验证码和多步认证不自动执行，使用 manual fallback。
+- `bearer`：将用户输入作为 Token，按配置的 Header 名和 prefix 注入。
+- `header`：将用户输入按配置的 Header 名和 prefix 注入。
+- `cookie`：将用户输入解析为一个绑定精确 origin 的 cookie jar。
 
-### 10.4 提取与注入
+配置使用 `type` 加同名类型对象。严格 Schema 要求只出现当前类型对应的对象；同时出现多个类型对象或出现无关类型对象时返回 `CONFIG_INVALID`。由 profile 管理的认证 Header 和 Cookie 不能被 `http_request.headers` 覆盖。
 
-每个 auth profile 最多包含 5 个 credential。提取来源：
+### 10.4 Cookie 与 CSRF
 
-- JSON body 点路径
-- 响应 Header
-- 指定 Set-Cookie
+Cookie 输入同时接受：
 
-注入方式：
+```text
+Cookie: SESSION=abc123; XSRF-TOKEN=xyz789
+SESSION=abc123; XSRF-TOKEN=xyz789
+```
 
-- Bearer
-- 自定义 Header
-- Cookie
+- 输入总大小不得超过 16 KiB，最多 50 个 Cookie。
+- 拒绝 CRLF、控制字符、非法 Cookie 名和无法解析的条目。
+- 手工输入的 Cookie 默认使用配置的 `defaultPath`，第一版默认 `/`。
+- cookie jar 绑定 profile 的精确 origin；Cookie Domain 不能扩大该范围。
+- Path 不匹配时不发送；带 `Secure` 的 Cookie 不得通过 HTTP 发送。
+- 跨 origin 重定向移除全部 Cookie。
+- 同 origin 响应中的 `Set-Cookie` 可以更新、轮换或删除已保存 Cookie，但不得扩大 origin 绑定。
+- 日志和工具结果只记录 Cookie 名称、数量和更新动作，绝不记录值。
 
-Agent 根据项目代码指定字段和路径，Server 不自动猜测。
+Cookie profile 可以从指定 Cookie 派生 CSRF Header。配置指定 `cookieName`、`headerName` 和可选的 URL decode；请求前读取当前 cookie jar 中的值并注入 Header。第一版不支持从 Cookie 之外的来源获取 CSRF 值。
 
-Set-Cookie 模式保留 Path、Secure、Expires 和 Max-Age 等必要属性。Cookie 的 Domain 不扩大 profile 的精确 origin 绑定；请求 path 不匹配或 Secure Cookie 用于 HTTP 时不得注入。
+派生 CSRF Header 是 Cookie 认证的附属请求完整性机制，不构成第二种认证类型，也不保存独立认证值。
 
 ### 10.5 本机敏感输入页面
 
@@ -365,7 +374,9 @@ Set-Cookie 模式保留 Path、Secure、Expires 和 Max-Age 等必要属性。Co
 - 使用 `filelock` 提供跨进程锁。
 - 使用同目录临时文件和原子替换。
 - profile 文件权限为 `0600`。
-- Token 持久化到用户替换或显式删除。
+- 认证值持久化到用户替换或显式删除。
+- profile 文件记录 `auth_type` 和认证注入配置摘要，不记录项目配置全文。
+- 当前配置摘要与已保存记录不一致时停止注入并标记 `invalid`，原因记为 `auth_config_changed`；用户通过 `set_auth` 原子替换后恢复。
 
 ### 10.7 状态与失效
 
@@ -380,7 +391,7 @@ Set-Cookie 模式保留 Path、Secure、Expires 和 Max-Age 等必要属性。Co
 
 ### 11.1 敏感数据
 
-- Agent 通过登录提取路径和 `sensitive_paths` 指定敏感位置。
+- Agent 通过 `sensitive_paths` 指定额外敏感位置。
 - `Authorization`、`Cookie`、`Set-Cookie` 始终脱敏。
 - 已保存认证值按精确值匹配并脱敏，无论响应字段名是什么。
 - 脱敏保留原类型和长度信息。
@@ -439,7 +450,7 @@ Set-Cookie 模式保留 Path、Secure、Expires 和 Max-Age 等必要属性。Co
 - 单会话上限 100 MiB，超限删除最久未使用项。
 - 文件名使用随机 `response_id`。
 - 缓存保存“已脱敏但尚未按结果预算采样”的响应，不保存已知认证值。
-- authenticate 的登录响应不进入 response cache。
+- `set_auth` 不产生 HTTP 响应，因此不写入 response cache。
 - 正常退出删除会话目录。
 - 启动时清理超过 24 小时的遗留目录。
 - 只能由创建缓存的会话读取。
@@ -464,6 +475,7 @@ Set-Cookie 模式保留 Path、Secure、Expires 和 Max-Age 等必要属性。Co
 - host、方法、不安全 HTTP/TLS、代理和 debug 确认结果。
 - DNS、安全检查、重定向、重试、排队和超时。
 - auth profile 状态变化，但不记录认证值。
+- Cookie 更新日志只记录名称和 `added`、`updated`、`deleted` 动作。
 - 响应状态、大小、类型、采样、截断和脱敏统计。
 - 内部异常类型和本地堆栈。
 
@@ -474,7 +486,7 @@ Set-Cookie 模式保留 Path、Secure、Expires 和 Max-Age 等必要属性。Co
 - `http_request(debug=true)` 请求用户确认。
 - 只对该次请求记录脱敏、裁剪后的工具输入和输出。
 - 不开启长期会话状态。
-- Token、密码、Cookie 值和登录表单内容永不落盘。
+- Token 和 Cookie 值永不写入日志；本机敏感输入只写入受保护的 auth profile 文件。
 
 ### 12.4 保留策略
 
@@ -488,14 +500,14 @@ Set-Cookie 模式保留 Path、Secure、Expires 和 Max-Age 等必要属性。Co
 第一版固定 7 个工具：
 
 1. `configure_session`
-2. `authenticate`
+2. `set_auth`
 3. `get_auth_status`
 4. `http_request`
 5. `inspect_response`
 6. `delete_auth_profile`
 7. `get_diagnostics`
 
-不提供 `set_token`、`get_token`、`login_and_save` 和 `save_snapshot`。具体参数、返回值和错误码见 [工具参考](docs/tools.md)。
+不提供自动登录、`set_token`、`get_token`、`login_and_save` 和 `save_snapshot`。具体参数、返回值和错误码见 [工具参考](docs/tools.md)。
 
 ## 14. 错误模型
 
@@ -572,6 +584,8 @@ pytest
 - Header 限制、脱敏和精确认证值匹配。
 - 数组代表项、长值截断和结果预算。
 - profile 文件锁、权限、原子替换和失效状态。
+- 单一认证类型严格校验、认证配置变化阻止旧值注入。
+- Cookie bundle 解析限制、origin/path/secure 规则、Set-Cookie 更新和 CSRF Header 派生。
 - 错误码和日志脱敏。
 
 ### 17.2 集成测试
@@ -579,8 +593,8 @@ pytest
 使用本地模拟 API 覆盖：
 
 - JSON、form、raw 请求。
-- login/manual 鉴权。
-- Bearer、Header、Cookie 和多 credential。
+- Agent 配置认证类型后由用户手工录入认证值。
+- Bearer、自定义 Header、Cookie bundle、Cookie 更新和 CSRF Header 派生。
 - 401/body 失效规则。
 - HTTP 风险确认、TLS 关闭确认和代理确认。
 - 非只读方法确认、重定向、重试、超时和并发排队。
@@ -596,12 +610,14 @@ pytest
 - stdio Server 注册和工具发现。
 - form elicitation。
 - URL elicitation 和本机敏感输入页面。
-- 配置注入、登录、手动认证、请求和 inspect。
+- 配置注入、手工认证、请求和 inspect。
 - debug 确认和 diagnostics 查询。
 
 ## 18. 验收标准
 
 - Agent 无需得到明文 Token 即可访问受保护 API。
+- Agent 能根据项目代码配置唯一认证类型，用户页面不要求选择类型。
+- 认证配置变化后旧值不会按新方式注入，必须重新调用 `set_auth`。
 - 默认不能访问非回环目标；经确认后只授权当前会话的精确 origin。
 - 非只读请求默认确认，端点规则匹配准确且不可越权。
 - 认证值不出现在工具结果、错误、日志和项目配置中。

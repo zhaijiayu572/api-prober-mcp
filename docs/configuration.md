@@ -18,7 +18,7 @@ API Prober 使用三层配置：
 - 高优先级配置可以收紧低优先级配置或覆盖普通默认值。
 - 任何层级都不能突破 Server 硬限制。
 - 项目配置不能设置代理、危险 metadata 覆盖或自动开启 debug。
-- 配置中禁止保存 Token、密码、Cookie 值和代理凭证。
+- 配置中禁止保存 Token、Cookie 值和代理凭证。
 - 所有大小字段使用字节，按 UTF-8 序列化后的大小计算。
 
 ## 2. 通用约定
@@ -68,7 +68,7 @@ result.session.ticket
 code
 ```
 
-数组下标不用于认证提取或失效规则。需要数组中的值时，应调整接口或使用手动认证。
+数组下标不用于失效规则。
 
 ### 2.4 Path pattern
 
@@ -304,8 +304,11 @@ HTTP origin 不得出现在 `tls` 中。
   "authProfiles": {
     "default": {
       "origin": "http://dev-api.example.internal:8080",
-      "login": null,
-      "credentials": [],
+      "type": "bearer",
+      "bearer": {
+        "headerName": "Authorization",
+        "prefix": "Bearer "
+      },
       "invalidWhen": {
         "statusCodes": [401],
         "bodyRules": []
@@ -322,108 +325,100 @@ profile name 约束与 `projectKey` 相同，长度 `1..64`。
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 |---|---|---:|---|---|
 | `origin` | string | 是 | 无 | 认证信息绑定的精确 origin。 |
-| `login` | object/null | 否 | `null` | 自动登录配置。manual-only profile 使用 `null`。 |
-| `credentials` | object[] | 是 | 无 | `1..5` 个认证值的提取和注入规则。 |
+| `type` | string | 是 | 无 | `bearer`、`header` 或 `cookie`。由 Agent 根据项目代码判断并配置。 |
+| `bearer` | object | `type=bearer` 时是 | 无 | Bearer Header 注入配置。 |
+| `header` | object | `type=header` 时是 | 无 | 自定义 Header 注入配置。 |
+| `cookie` | object | `type=cookie` 时是 | 无 | Cookie jar 和 CSRF Header 配置。 |
 | `invalidWhen` | object | 否 | 仅 `401` | 认证失效判断。 |
 
 `origin` 必须出现在项目 `allowedHosts` 中，或属于 Server 内置回环目标。
 
-#### 4.5.2 `login`
+每个 profile 必须且只能配置一种认证类型。严格校验规则：
+
+- `type` 对应的同名对象必须存在。
+- 另外两个类型对象必须不存在。
+- 不接受未知类型、未知字段或多个认证类型对象。
+- `.api-prober.json` 只保存注入方式，不保存 Token 或 Cookie 值。
+- Agent 修改 `type` 或其注入对象后，已保存值因配置摘要不匹配而停止使用，必须重新调用 `set_auth`。
+
+#### 4.5.2 `bearer`
 
 ```json
 {
-  "login": {
-    "url": "http://dev-api.example.internal:8080/auth/login",
-    "contentType": "json",
-    "fields": [
-      {
-        "name": "username",
-        "label": "Username",
-        "type": "text",
-        "required": true
-      },
-      {
-        "name": "password",
-        "label": "Password",
-        "type": "password",
-        "required": true
-      }
-    ],
-    "staticBody": {
-      "clientType": "web"
-    }
+  "type": "bearer",
+  "bearer": {
+    "headerName": "Authorization",
+    "prefix": "Bearer "
   }
 }
 ```
 
-| 字段 | 类型 | 必填 | 允许值/约束 | 说明 |
+| 字段 | 类型 | 必填 | 默认值 | 说明 |
 |---|---|---:|---|---|
-| `url` | string | 是 | 与 profile 同 origin 的完整 URL | 第一版固定使用 POST。 |
-| `contentType` | string | 是 | `json`, `form` | 登录请求编码。 |
-| `fields` | object[] | 是 | `1..20` | 本机敏感输入页面字段。 |
-| `staticBody` | object | 否 | 扁平 JSON 标量 | 非敏感固定字段。 |
+| `headerName` | string | 否 | `Authorization` | 注入 Token 的 Header 名。 |
+| `prefix` | string | 否 | `Bearer ` | Token 前缀；允许空字符串。 |
 
-登录字段：
+用户只粘贴 Token 本体。Server 组合 `prefix + value`，不要求用户重复输入 `Bearer `。
 
-| 字段 | 类型 | 必填 | 说明 |
-|---|---|---:|---|
-| `name` | string | 是 | 发送给登录接口的字段名。 |
-| `label` | string | 是 | 本机页面显示标签。 |
-| `type` | string | 是 | `text` 或 `password`。 |
-| `required` | boolean | 否 | 默认 `true`。 |
-
-`staticBody` 禁止包含名称与登录字段相同的 key，禁止嵌套对象和数组，禁止秘密。
-
-#### 4.5.3 `credentials`
+#### 4.5.3 `header`
 
 ```json
 {
-  "credentials": [
-    {
-      "name": "access-token",
-      "extract": {
-        "source": "json_body",
-        "path": "data.accessToken"
-      },
-      "inject": {
-        "type": "bearer",
-        "name": "Authorization",
-        "prefix": "Bearer "
-      }
-    }
-  ]
+  "type": "header",
+  "header": {
+    "name": "X-Token",
+    "prefix": ""
+  }
 }
 ```
 
-credential 字段：
+| 字段 | 类型 | 必填 | 默认值 | 说明 |
+|---|---|---:|---|---|
+| `name` | string | 是 | 无 | 注入值的 Header 名。 |
+| `prefix` | string | 否 | `""` | 值前缀。 |
 
-| 字段 | 类型 | 必填 | 说明 |
-|---|---|---:|---|
-| `name` | string | 是 | profile 内唯一名称，也用于 manual 页面标签。 |
-| `extract` | object/null | login 模式是 | 自动登录后的提取规则；manual-only 可为 `null`。 |
-| `inject` | object | 是 | 请求注入规则。 |
+#### 4.5.4 `cookie`
 
-`extract.source`：
+```json
+{
+  "type": "cookie",
+  "cookie": {
+    "defaultPath": "/",
+    "csrfHeaders": [
+      {
+        "cookieName": "XSRF-TOKEN",
+        "headerName": "X-XSRF-TOKEN",
+        "decode": "url"
+      }
+    ]
+  }
+}
+```
 
-| 值 | 附加字段 | 说明 |
-|---|---|---|
-| `json_body` | `path` | 从 JSON body 点路径提取。 |
-| `response_header` | `name`, 可选 `stripPrefix` | 从响应 Header 提取。 |
-| `set_cookie` | `name` | 从指定 Cookie 名提取。 |
+| 字段 | 类型 | 必填 | 默认值 | 说明 |
+|---|---|---:|---|---|
+| `defaultPath` | string | 否 | `/` | 手工录入 Cookie 的默认 Path，必须以 `/` 开头。 |
+| `csrfHeaders` | object[] | 否 | `[]` | 从 cookie jar 派生的 CSRF Header，最多 10 项。 |
 
-`inject.type`：
+`csrfHeaders` 条目：
 
-| 值 | 字段 | 说明 |
-|---|---|---|
-| `bearer` | 可选 `name`, `prefix` | 默认 `Authorization` 和 `Bearer `。 |
-| `header` | 必填 `name`, 可选 `prefix` | 注入自定义 Header。 |
-| `cookie` | 必填 `name` | 注入 Cookie。 |
+| 字段 | 类型 | 必填 | 默认值 | 说明 |
+|---|---|---:|---|---|
+| `cookieName` | string | 是 | 无 | 作为值来源的 Cookie 名。 |
+| `headerName` | string | 是 | 无 | 请求时注入的 Header 名。 |
+| `decode` | string | 否 | `none` | `none` 或 `url`；`url` 表示注入前进行一次 URL decode。 |
 
-由 profile 管理的 Header/Cookie 不能被 `http_request.headers` 覆盖。
+Cookie 用户输入接受带或不带 `Cookie:` 前缀的 Cookie Header 值。总输入最大 16 KiB，最多 50 个 Cookie；拒绝 CRLF、控制字符、非法 Cookie 名和无法解析的条目。
 
-Set-Cookie 提取保留 Path、Secure、Expires 和 Max-Age。Domain 属性不能扩大 profile 的精确 origin 绑定；Path 不匹配或 Secure Cookie 用于 HTTP 时不注入。
+手工 Cookie 进入绑定精确 origin 的 cookie jar。同 origin 的 `Set-Cookie` 可以更新、轮换或删除条目，并保留 Path、Secure、Expires 和 Max-Age；Domain 不得扩大 profile 的 origin 绑定。Path 不匹配或 Secure Cookie 用于 HTTP 时不注入，跨 origin 重定向移除全部 Cookie。日志和工具结果只允许出现 Cookie 名、数量和更新动作。
 
-#### 4.5.4 `invalidWhen`
+CSRF Header 只能从当前 cookie jar 中的命名 Cookie 派生。第一版不支持响应 Header、HTML 或其他来源的 CSRF 值。
+
+派生 CSRF Header 属于 `cookie` 类型内部行为，不构成第二种认证类型，也不保存独立值。
+
+由 profile 管理的 Header、Cookie 和派生 CSRF Header 不能被 `http_request.headers` 覆盖。
+
+#### 4.5.5 `invalidWhen`
 
 ```json
 {
@@ -499,7 +494,7 @@ body rule 的 `equals` 允许 string、number、boolean 或 null。
 | `allowedHeaders` | string[] | `[]` | 追加允许返回的响应 Header。 |
 | `sensitivePaths` | string[] | `[]` | 所有普通响应默认脱敏的点路径。 |
 
-已保存 credential 的精确值、Authorization、Cookie 和 Set-Cookie 不依赖该列表，始终脱敏。
+已保存认证值的精确值、Authorization、Cookie 和 Set-Cookie 不依赖该列表，始终脱敏。
 
 ## 5. 完整示例
 
@@ -517,7 +512,7 @@ body rule 的 `equals` 允许 string、number、boolean 或 null。
 
 回环地址由 Server 内置允许。
 
-### 5.2 Bearer 登录
+### 5.2 Bearer Token
 
 ```json
 {
@@ -527,22 +522,11 @@ body rule 的 `equals` 允许 string、number、boolean 或 null。
   "authProfiles": {
     "default": {
       "origin": "http://crm-dev.internal:8080",
-      "login": {
-        "url": "http://crm-dev.internal:8080/auth/login",
-        "contentType": "json",
-        "fields": [
-          {"name": "username", "label": "Username", "type": "text", "required": true},
-          {"name": "password", "label": "Password", "type": "password", "required": true}
-        ],
-        "staticBody": {"clientType": "web"}
+      "type": "bearer",
+      "bearer": {
+        "headerName": "Authorization",
+        "prefix": "Bearer "
       },
-      "credentials": [
-        {
-          "name": "access-token",
-          "extract": {"source": "json_body", "path": "data.accessToken"},
-          "inject": {"type": "bearer"}
-        }
-      ],
       "invalidWhen": {
         "statusCodes": [401],
         "bodyRules": [{"path": "code", "equals": 401}]
@@ -550,12 +534,6 @@ body rule 的 `equals` 允许 string、number、boolean 或 null。
     }
   },
   "endpointRules": [
-    {
-      "method": "POST",
-      "origin": "http://crm-dev.internal:8080",
-      "path": "/auth/login",
-      "skipConfirmation": true
-    },
     {
       "method": "POST",
       "origin": "http://crm-dev.internal:8080",
@@ -567,7 +545,9 @@ body rule 的 `equals` 允许 string、number、boolean 或 null。
 }
 ```
 
-### 5.3 自定义 Header 与手动 Token
+Agent 从项目代码识别出 `Authorization: Bearer <token>` 后写入该配置。调用 `set_auth` 时，用户只粘贴 Token 本体。
+
+### 5.3 自定义 Header
 
 ```json
 {
@@ -577,14 +557,11 @@ body rule 的 `equals` 允许 string、number、boolean 或 null。
   "authProfiles": {
     "manual": {
       "origin": "https://approval-test.example.com",
-      "login": null,
-      "credentials": [
-        {
-          "name": "x-token",
-          "extract": null,
-          "inject": {"type": "header", "name": "X-Token"}
-        }
-      ],
+      "type": "header",
+      "header": {
+        "name": "X-Token",
+        "prefix": ""
+      },
       "invalidWhen": {"statusCodes": [401], "bodyRules": []}
     }
   },
@@ -592,7 +569,7 @@ body rule 的 `equals` 允许 string、number、boolean 或 null。
 }
 ```
 
-Agent 调用 `authenticate(mode="manual")` 后，用户在本机页面粘贴值。
+Agent 从请求拦截器或 API 客户端代码识别 Header 名后写入配置，再调用 `set_auth`。用户无需在页面选择认证方式。
 
 ### 5.4 Cookie + CSRF
 
@@ -604,33 +581,25 @@ Agent 调用 `authenticate(mode="manual")` 后，用户在本机页面粘贴值�
   "authProfiles": {
     "session": {
       "origin": "http://legacy-test.internal",
-      "login": {
-        "url": "http://legacy-test.internal/login",
-        "contentType": "form",
-        "fields": [
-          {"name": "account", "label": "Account", "type": "text", "required": true},
-          {"name": "password", "label": "Password", "type": "password", "required": true}
-        ],
-        "staticBody": {}
+      "type": "cookie",
+      "cookie": {
+        "defaultPath": "/",
+        "csrfHeaders": [
+          {
+            "cookieName": "XSRF-TOKEN",
+            "headerName": "X-XSRF-TOKEN",
+            "decode": "url"
+          }
+        ]
       },
-      "credentials": [
-        {
-          "name": "session-cookie",
-          "extract": {"source": "set_cookie", "name": "SESSION"},
-          "inject": {"type": "cookie", "name": "SESSION"}
-        },
-        {
-          "name": "csrf-token",
-          "extract": {"source": "response_header", "name": "X-CSRF-Token"},
-          "inject": {"type": "header", "name": "X-CSRF-Token"}
-        }
-      ],
       "invalidWhen": {"statusCodes": [401], "bodyRules": []}
     }
   },
   "endpointRules": []
 }
 ```
+
+用户可以粘贴 `Cookie: SESSION=abc123; XSRF-TOKEN=xyz789`。Server 保存为 cookie jar，并在请求时从 `XSRF-TOKEN` 派生 `X-XSRF-TOKEN` Header。
 
 ### 5.5 自签名 HTTPS
 

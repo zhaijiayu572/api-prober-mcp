@@ -10,7 +10,7 @@
 
 - API Prober 已安装并注册到当前客户端。
 - 项目根目录存在 `.api-prober.json`。
-- 项目配置不包含 Token 或密码。
+- 项目配置不包含 Token 或 Cookie 值。
 - 目标是开发或测试环境。
 
 ## 2. 标准工作流
@@ -21,7 +21,7 @@ Agent 应按以下顺序工作：
 读取 .api-prober.json
   -> configure_session
   -> get_auth_status
-  -> 必要时 authenticate
+  -> 必要时 set_auth
   -> http_request
   -> 必要时 inspect_response
   -> Agent 自行保存或更新项目快照
@@ -58,24 +58,52 @@ http_request(
 
 回环地址无需额外 host 确认。
 
-## 4. 使用用户名和密码登录
+## 4. Agent 识别认证方式
 
-当 auth profile 配置了 `login`：
+第一版不代替用户登录，也不处理密码加密。Agent 读取项目的请求封装、拦截器和认证相关代码，判断受保护接口使用哪一种方式：
+
+- `bearer`：例如 `Authorization: Bearer <token>`。
+- `header`：例如 `X-Token: <token>`。
+- `cookie`：一个或多个 Cookie，可选从 Cookie 派生 CSRF Header。
+
+Agent 将识别结果写入 `.api-prober.json`。每个 auth profile 只能配置一种类型，用户不需要在输入页面选择。
+
+Bearer 示例：
+
+```json
+{
+  "authProfiles": {
+    "default": {
+      "origin": "http://crm-dev.internal:8080",
+      "type": "bearer",
+      "bearer": {
+        "headerName": "Authorization",
+        "prefix": "Bearer "
+      },
+      "invalidWhen": {
+        "statusCodes": [401],
+        "bodyRules": []
+      }
+    }
+  }
+}
+```
+
+配置完成后：
 
 1. Agent 调用：
 
 ```text
-authenticate(
+set_auth(
   project_key="crm-dev",
-  auth_profile_name="default",
-  mode="login"
+  auth_profile_name="default"
 )
 ```
 
 2. 客户端显示 URL elicitation。
-3. 用户在本机页面输入登录字段。
-4. Server 调用登录接口、提取 credential 并安全保存。
-5. Agent 只收到 profile 状态，不会收到 Token。
+3. 本机页面展示 Agent 识别的认证类型、origin 和注入摘要。
+4. 用户粘贴已自行取得的 Token。
+5. Server 安全保存，Agent 只收到类型、状态和数量。
 
 随后请求：
 
@@ -90,21 +118,53 @@ http_request(
 
 非本机 HTTP 首次发送凭证时，用户需要确认明文传输风险。
 
-## 5. 验证码或 SSO 系统
+## 5. Cookie 认证
 
-复杂认证不由 Server 自动完成。用户先通过现有系统获取 Token，再使用 manual 模式：
+Agent 如果识别到浏览器会话 Cookie，可配置：
+
+```json
+{
+  "authProfiles": {
+    "session": {
+      "origin": "http://legacy-test.internal",
+      "type": "cookie",
+      "cookie": {
+        "defaultPath": "/",
+        "csrfHeaders": [
+          {
+            "cookieName": "XSRF-TOKEN",
+            "headerName": "X-XSRF-TOKEN",
+            "decode": "url"
+          }
+        ]
+      },
+      "invalidWhen": {
+        "statusCodes": [401],
+        "bodyRules": []
+      }
+    }
+  }
+}
+```
+
+Agent 调用：
 
 ```text
-authenticate(
-  project_key="approval-test",
-  auth_profile_name="manual",
-  mode="manual"
+set_auth(
+  project_key="legacy-test",
+  auth_profile_name="session"
 )
 ```
 
-用户在本机页面粘贴 Token。Token 不经过 Agent。
+用户可粘贴：
 
-后续请求与 login 模式相同，只引用 profile name。
+```text
+Cookie: SESSION=abc123; XSRF-TOKEN=xyz789
+```
+
+Server 将其解析为 cookie jar。同 origin 的 `Set-Cookie` 可以更新或删除保存的 Cookie；请求时从 `XSRF-TOKEN` 派生 `X-XSRF-TOKEN`。Agent 和日志都不会得到 Cookie 值。
+
+若 Agent 识别错误，Agent 修改 `.api-prober.json`，重新调用 `configure_session` 和 `set_auth`。用户仍只负责粘贴对应的认证值。
 
 ## 6. 探测 POST 查询接口
 
@@ -195,7 +255,7 @@ inspect_response(
 Agent 应：
 
 1. 调用 `get_auth_status` 确认状态。
-2. 调用 `authenticate` 重新登录或手动录入。
+2. 用户自行取得新认证值后，调用 `set_auth` 替换。
 3. 新值保存成功后重新请求。
 
 不要根据自然语言错误自行删除凭证。只有用户明确需要时才调用 `delete_auth_profile`。
@@ -253,7 +313,7 @@ docs/api-snapshots/users/list.json
 ## API 探测约定
 
 1. 读取 `.api-prober.json` 并调用 `configure_session`。
-2. 不向工具参数、项目文件或对话输出写入 Token、密码和 Cookie 值。
+2. 不向工具参数、项目文件或对话输出写入 Token 和 Cookie 值。
 3. 优先读取项目已有接口快照；需要实时或缺失结构时调用 API Prober。
 4. 大型响应使用 `inspect_response`，不要盲目提高结果预算。
 5. 项目快照由当前 Agent 使用原生文件工具维护。
