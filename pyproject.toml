@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "api-prober-mcp"
+version = "0.1.0"
+description = "Controlled HTTP probing MCP server"
+readme = "api-prober-mcp-design.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "filelock>=3.16,<4",
+  "httpx>=0.27,<1",
+  "pydantic>=2.9,<3",
+  "fastmcp>=3,<4",
+]
+
+[dependency-groups]
+dev = [
+  "mypy>=1.13,<2",
+  "pytest>=8.3,<9",
+  "pytest-asyncio>=0.24,<1",
+  "ruff>=0.8,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/api_prober_mcp"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+mypy_path = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
