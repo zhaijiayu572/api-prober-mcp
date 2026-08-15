@@ -15,6 +15,9 @@ dependencies = [
   "fastmcp>=3,<4",
 ]
 
+[project.scripts]
+api-prober-mcp = "api_prober_mcp.server:main"
+
 [dependency-groups]
 dev = [
   "mypy>=1.13,<2",
@@ -32,6 +35,7 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
 
 [tool.mypy]
 python_version = "3.12"
