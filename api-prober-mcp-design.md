@@ -638,3 +638,93 @@ pytest
 - 由 Agent 管理的快照 diff 和变化提示。
 - 系统 Keyring 凭证后端。
 - 远程 MCP transport 与独立服务认证。
+
+## 20. 一期实现取舍与风险清单
+
+第一版以个人本地使用和核心功能交付为优先，同时保留必要的安全底线。下表中的“风险等级”表示问题不处理时的潜在影响；“一期优先级”表示建议的实现顺序：
+
+- **P0**：核心功能或契约不可用，一期必须处理。
+- **P1**：安全底线或资源边界，建议一期处理；允许采用简化实现。
+- **P2**：可以在核心功能完成后处理，延期不会阻塞主流程。
+- **P3**：文档和工程增强项，可放入后续版本。
+
+| 编号 | 问题 | 风险等级 | 一期优先级 | 一期处理建议 |
+|---:|---|---|---|---|
+| 1 | DNS 解析结果未明确绑定到实际连接，存在 DNS rebinding 或 SSRF 绕过可能 | 严重 | P1 | 请求前检查解析出的地址，至少阻止回环、私网、link-local 和 metadata 地址；完整连接固定延后处理 |
+| 2 | `projectKey + profile + origin` 不能充分证明项目身份，可能误用已有凭证 | 严重 | P1 | 个人使用阶段要求项目使用唯一 `projectKey`，首次使用已有 profile 时增加确认 |
+| 3 | 压缩响应解压后可能远超 10 MiB，造成内存或 CPU 消耗 | 高 | P1 | 流式限制 wire bytes 和解压后 bytes，第一期至少支持 gzip |
+| 4 | 请求 URL、Header、query、body 和配置对象缺少统一资源上限 | 高 | P1 | 增加总大小、数量和基本嵌套深度限制 |
+| 5 | 重定向时 body、Header 和确认行为不够明确 | 高 | P1 | 同 origin 可自动跟随；跨 origin 停止并确认，不自动转发认证、Cookie 和 body |
+| 6 | URL/path 规范化可能导致策略匹配与实际请求不一致 | 高 | P1 | 拒绝控制字符、userinfo、fragment、反斜杠和编码路径分隔符，限制 URL decode |
+| 7 | Bearer/Header profile 可配置危险 Header 名 | 高 | P1 | 配置校验阶段禁止 `Host`、`Content-Length`、`Proxy-Authorization`、`Cookie` 及 hop-by-hop Header |
+| 8 | Cookie jar 的 Domain、Path、数量、过期和 `Set-Cookie` 行为不完整 | 中高 | P1 | 一期只支持 host-only Cookie，限制数量和大小，处理 `Secure`、`Path` 和删除 |
+| 9 | `debug=true` 可能将 query、普通 Header 或 raw body 中的秘密写入日志 | 高 | P1 | debug 默认只记录元数据、字段名、长度和脱敏结果，不记录 query 值、body 和 Header 值 |
+| 10 | 异常、重定向链和 URL 可能把敏感信息写入日志 | 高 | P1 | 统一日志白名单；URL 只记录 origin/path，不直接记录异常、request 或 response 对象 |
+| 11 | 本机敏感输入页面的浏览器攻击面定义不完整 | 中高 | P1 | 严格校验 Host、一次性 nonce、Content-Type 和大小，设置 `frame-ancestors 'none'` |
+| 12 | 本地凭证文件的 symlink、竞态和临时文件处理未定义 | 中高 | P1 | 安全创建、拒绝 symlink、同目录临时文件、原子替换；暂缓 swap/core dump 防护 |
+| 13 | `http_request.url` 的非法输入校验未与 origin 规则完全对齐 | 中 | P1 | 拒绝 userinfo、fragment、非法 scheme/端口、控制字符和空 host |
+| 14 | 响应脱敏的匹配层级不明确，可能被编码形式绕过 | 高 | P1 | 解压和字符集处理后、缓存前完成脱敏；结构化 JSON 按原值匹配 |
+| 15 | 结果预算可能被 metadata、redactions 或 truncations 占满 | 中 | P1 | envelope/metadata 设置固定上限，body 优先，所有结果重新序列化后确认不超预算 |
+| 16 | response cache 的 ID、并发清理和异常退出行为不完整 | 中 | P2 | 一期使用随机 session/response ID、0600 文件和进程退出清理；复杂跨进程 LRU 后置 |
+| 17 | GET 自动重试不一定安全，部分 GET 接口可能有副作用 | 中高 | P2 | 一期仅重试连接失败和 `502/503/504`，增加项目级 `retry: false` |
+| 18 | 安装升级缺少依赖 hash、回滚和供应链校验 | 中 | P2 | 一期固定依赖版本并使用 lock 文件；完整回滚和 hash 校验后置 |
+| 19 | `skipConfirmation` 的宽泛路径规则可能被滥用 | 高 | P1 | 一期限制为精确 origin、method 和 path，禁止或严格限制 `/**` |
+| 20 | `inspect_response` 的 path、offset、limit 缺少充分边界 | 中 | P1 | 限制 path 长度、offset/limit、解析深度和返回结果大小 |
+| 21 | JSON 解析、数组采样和长字符串可能造成资源耗尽 | 中高 | P1 | 限制 JSON 深度、数组元素数、对象键数和字符串长度 |
+| 22 | `Set-Cookie` 自动更新凭证状态，可能改变后续认证行为 | 中高 | P2 | 一期保留该能力，但记录 Cookie 名称和增删改动作并设置 jar 上限 |
+| 23 | 跨 origin 重定向可能泄露业务 body | 高 | P1 | 跨 origin 不自动转发 body；确认后建议重新发起请求，不自动重放 |
+| 24 | metadata 阻止列表可能遗漏 IPv6 和解析后的地址变体 | 高 | P1 | 按解析后的 IP 判断，覆盖常见私网、回环、link-local 和 metadata 地址 |
+| 25 | 配置变更时旧授权、profile 状态和缓存关联不明确 | 中 | P1 | 配置 hash 变化撤销临时授权并使旧 profile 失效；缓存继续只读 |
+| 26 | `301/302/303` 方法转换依赖客户端默认行为 | 中 | P2 | 关闭隐式 redirect，使用明确状态机并记录每次方法变化 |
+| 27 | 代理的 DNS、认证确认和回环直连规则实现复杂 | 中高 | P2 | 一期可禁用代理，或仅支持无认证 HTTP 代理 |
+| 28 | 错误 details、next_action 和 diagnostics 可能绕过脱敏 | 中 | P1 | 对错误和 diagnostics 统一应用结果预算及敏感值脱敏 |
+
+### 20.1 一期必须完成
+
+一期至少覆盖以下功能和安全底线：
+
+1. 严格项目配置校验、配置 hash、认证 profile 创建/替换/失效和删除。
+2. Bearer、自定义 Header、Cookie + CSRF 的核心注入流程。
+3. 回环地址和基本非默认 origin/IP/metadata 检查。
+4. URL、Header、query、JSON/form/raw body 和配置对象的输入上限。
+5. 危险 Header 禁止、控制字符拒绝和 URL 基本规范化。
+6. 同 origin 重定向处理；跨 origin 不自动携带认证、Cookie 或 body。
+7. 非只读方法确认和精确 endpoint rule 匹配。
+8. 响应流式下载限制、至少 gzip 的解压后限制、基本 JSON 深度/数量限制。
+9. 响应脱敏必须在缓存前完成；默认日志和 debug 不记录 query、body、Header 值。
+10. 结果预算、数组采样、`inspect_response` 边界和错误/diagnostics 脱敏。
+11. 本机敏感输入页面的 nonce、CSRF、Host/Origin 校验和基础浏览器安全 Header。
+12. 凭证文件安全创建、权限校验、锁、原子替换和 symlink 拒绝。
+
+一期 A/B 的目标是完成“配置、手工录入认证、HTTP 探测、响应查看、诊断查询”的闭环；其中安全底线允许使用本文标注的简化策略。
+
+### 20.2 后续任务清单
+
+以下项目从一期范围中明确拆出，作为后续任务处理，不影响一期核心闭环：
+
+| 后续任务 | 目标 |
+|---|---|
+| 完整 DNS pinning | 将已检查的 DNS 地址固定到实际 TCP/TLS 连接，同时保持正确的 Host、SNI 和证书校验 |
+| 更强的项目身份绑定 | 引入用户可识别的项目上下文或首次使用授权，避免仅凭字符串 `projectKey` 复用凭证 |
+| 完整 Cookie RFC 兼容性 | 完善 Domain、同名不同 Path、Cookie 优先级、异常属性和大规模 `Set-Cookie` 处理 |
+| 缓存并发与崩溃恢复 | 完善跨进程 LRU、锁、symlink 防护、残留目录清理和 session 绑定 |
+| 幂等性和重试策略 | 支持 endpoint 级 `retry: never`/幂等声明，细分各类网络中断的重试条件 |
+| 安装升级回滚 | 增加依赖 hash 校验、原子升级、失败回滚和配置迁移策略 |
+| 代理增强 | 支持更完整的代理类型、DNS 行为、代理确认和代理故障诊断 |
+| 更强的本地秘密保护 | 评估系统 Keyring、进程内存、swap、core dump 和备份工具泄漏风险 |
+| 完整内容编码支持 | 覆盖 gzip、deflate、br 等编码的流式限制、错误处理和资源保护 |
+| 更严格的响应解析沙箱 | 增加极深 JSON、异常 Unicode、超多字段和解析 CPU 时间限制 |
+| 完整 redirect 状态机 | 明确所有 301/302/303/307/308 的方法、body、Header 和确认语义 |
+
+### 20.3 一期验收补充
+
+除第 18 节既有验收标准外，一期测试应增加：
+
+- 解析到回环、私网、link-local、metadata 地址时被阻止。
+- 跨 origin redirect 不携带认证、Cookie 或 body。
+- gzip 解压后超过上限、深层 JSON 和超大请求输入被拒绝或截断。
+- profile 认证 Header 配置为危险 Header 时配置失败。
+- query、body、普通 Header、异常文本和 diagnostics 中不出现明文秘密。
+- Cookie 的 host-only、Path、Secure、过期删除和数量上限行为正确。
+- 配置 hash 变化后旧授权和旧认证值不会继续注入。
+- cache 文件和 profile 文件拒绝 symlink，结果和错误始终满足预算。
